@@ -1,0 +1,212 @@
+stage('test-direct') {
+    try {
+        timeout(time: 30, unit: 'MINUTES') {
+            sh '''
+                cd LibOS/test/ltp
+                cp -f toml_files/tests_direct.toml tests.toml
+                if [ "${os_release_id}" = "centos" ]
+                then
+                    cp -f manifest_CentOS.template manifest.template
+                fi
+                if [ "${os_release_id}" = "rhel" ]
+                then
+                    cp -f manifest_RHEL.template manifest.template
+                fi
+                if [ "${os_version}" = "18.04" ]
+                then
+                    cp -f manifest_18_04.template manifest.template
+                fi
+                if [ "${os_version}" = "20.04" ] || [ "${os_version}" = "21.10" ]
+                then
+                    cp -f manifest_20_04_21_10.template manifest.template
+                fi
+                make ${MAKEOPTS} -f Makefile.LTP all 
+            '''
+            // Run tests in a separate block, so that Jenkins measures build time and run time
+            // separately
+            sh '''
+                cd LibOS/test/ltp
+                export GRAMINE_LTP_LIVE_OUTPUT=fcntl14,fdatasync01
+                python3 -m pytest -v  --junit-xml=ltp.xml
+            '''            
+            /*
+            sh '''
+                cd LibOS/shim/test/ltp
+                export CFG=ltp-sudo-syscalls.cfg
+                export LTPSCENARIO=$PWD/install/runtest/syscalls-sudo
+                make -f Makefile.LTP ltp_results_2.xml LTPCFG=$CFG LTPTESTFILE=$LTPSCENARIO
+            '''
+            */
+        }
+    } catch (Exception e){
+        env.build_ok = false
+        sh 'echo "LTP Test Failed"'
+    } finally {
+        archiveArtifacts 'LibOS/test/ltp/ltp.xml'
+        junit 'LibOS/test/ltp/ltp.xml'
+    }
+
+    try{
+        timeout(time: 5, unit: 'MINUTES') {
+            sh '''
+                cd CI-Examples/python
+                make ${MAKEOPTS} DEBUG=1 all
+                make check
+            '''
+        }
+    } catch (Exception e){
+        env.build_ok = false
+        sh 'echo "Python Example Test Failed"'
+    } finally {
+            archiveArtifacts 'CI-Examples/python/TEST_*'
+    }
+
+    try{
+        timeout(time: 5, unit: 'MINUTES') {
+            sh '''
+                cd CI-Examples/bash
+                sed -i '/@rm OUTPUT/d' Makefile
+                if [ "${os_release_id}" = "centos" ]
+                then
+                    sed -i "s/bin\\/readlink/bin\\/coreutils/" Makefile
+                fi                
+                make ${MAKEOPTS} all
+                make ${MAKEOPTS} regression 2>&1 | tee result.txt
+            '''
+        }
+    } catch (Exception e){
+        env.build_ok = false
+        sh 'echo "Bash Example Test Failed"'
+    }
+
+    if (env.os_release_id == "ubuntu" && (Float.parseFloat(env.os_version) < 21)) 
+    {
+        try {
+            timeout(time: 10, unit: 'MINUTES') {
+                sh '''
+                    cd CI-Examples/memcached
+                    make ${MAKEOPTS} all
+                    make start-gramine-server &
+                    ../../Scripts/wait_for_server 5 127.0.0.1 11211
+                    # memcslap populates server but doesn't report errors, use
+                    # memcached-tool for this (must return two lines of stats)
+                    memcslap --servers=127.0.0.1 --concurrency=8
+                    src/scripts/memcached-tool 127.0.0.1 | wc -l | grep -w "2" 2>&1 | tee OUTPUT.txt
+                '''
+            }
+        } catch (Exception e){
+            env.build_ok = false
+            sh 'echo "Memcached Example Test Failed"'
+        }
+    }
+
+    try {
+        timeout(time: 10, unit: 'MINUTES') {
+            sh '''
+                cd CI-Examples/redis
+                if .ci/isdistro xenial
+                then
+                    USE_SELECT=1
+                    export USE_SELECT
+                fi
+                make ${MAKEOPTS} all
+                make start-gramine-server &
+                ../../Scripts/wait_for_server 5 127.0.0.1 6379
+                ./src/src/redis-benchmark 2>&1 | tee OUTPUT
+            '''
+        }
+    } catch (Exception e){
+        env.build_ok = false
+        sh 'echo "Redis Example Test Failed"'
+    }
+
+    try {
+        timeout(time: 10, unit: 'MINUTES') {
+            sh '''
+                cd CI-Examples/lighttpd
+                make ${MAKEOPTS} all
+                make ${MAKEOPTS} start-gramine-server &
+                ../../Scripts/wait_for_server 5 127.0.0.1 8003
+                LOOP=1 CONCURRENCY_LIST="1 32" ../common_tools/benchmark-http.sh 127.0.0.1:8003
+            '''
+        }
+    } catch (Exception e){
+        env.build_ok = false
+        sh 'echo "Lighttpd Example Test Failed"'
+    }
+
+    try {
+        timeout(time: 10, unit: 'MINUTES') {
+            sh '''
+                cd CI-Examples/nginx
+                export PID=$(lsof -t -i:8002)
+                if [ "$PID" != "" ]
+                then
+                    echo "Killing $PID"
+                    kill -9 $PID
+                fi    
+                make ${MAKEOPTS} all
+                make ${MAKEOPTS} start-gramine-server &
+                ../../Scripts/wait_for_server 5 127.0.0.1 8002
+                LOOP=1 CONCURRENCY_LIST="1 32" ../common_tools/benchmark-http.sh 127.0.0.1:8002
+            '''
+        }
+    } catch (Exception e){
+        env.build_ok = false
+        sh 'echo "NGINX Example Test Failed"'
+    }
+
+    try {    
+        timeout(time: 5, unit: 'MINUTES') {
+            sh '''
+                cd CI-Examples/blender
+                make ${MAKEOPTS} all
+                make check
+            '''
+        }
+    } catch (Exception e){
+        env.build_ok = false
+        sh 'echo "Blender Example Test Failed"'
+    }
+
+    try{
+        timeout(time: 5, unit: 'MINUTES') {
+            sh '''
+                cd CI-Examples/sqlite
+                make ${MAKEOPTS} all
+                make ${MAKEOPTS} regression
+            '''
+        }
+    } catch (Exception e){
+        env.build_ok = false
+        sh 'echo "SQLite Example Test Failed"'
+    }
+    
+    try{
+        timeout(time: 10, unit: 'MINUTES') {
+            sh '''
+                cd CI-Examples/busybox
+                make ${MAKEOPTS} all
+                make ${MAKEOPTS} check 2>&1 | tee result.txt
+            '''
+        }
+    } catch (Exception e){
+        env.build_ok = false
+        sh 'echo "Busybox Example Test Failed"'
+    }
+
+    if(env.no_cpu.toInteger() > 16) 
+    { 
+        try{
+            timeout(time: 5, unit: 'MINUTES') {
+                sh '''
+                    cd CI-Examples/go_helloworld
+                    make check
+                '''
+            }
+        } catch (Exception e){
+            env.build_ok = false
+            sh 'echo "go_helloworld Example Test Failed"'
+        }
+    }
+}

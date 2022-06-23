@@ -1,0 +1,214 @@
+stage('test-examples') {              
+    if (env.SGX == "1") {
+        env.MODE = "sgx"
+    }
+    else {
+        env.MODE = "direct"
+    }
+
+    if (!((env.no_cpu.toInteger() < 16) && (env.SGX == '1')))
+    {
+        try {
+            timeout(time: 10, unit: 'MINUTES') {
+                sh '''
+                    cd CI-Examples/openjdk
+                    if [ "${os_release_id}" != 'ubuntu' ]
+                    then
+                        sed -i '$ a loader.pal_internal_mem_size = "64M"' java.manifest.template
+                        sed -i -e "/file:\\/usr\\/lib\\/jvm\\/java-11-openjdk-amd64/,+d" java.manifest.template
+                        sed -i -e "/^sgx.trusted_files = \\[.*/a \\"file:$JAVAHOME\\/lib\\/\\"," java.manifest.template
+                    fi
+                    make ${MAKEOPTS} all
+                    gramine-${MODE} java MultiThreadMain > OUTPUT
+                '''
+            }
+        } catch (Exception e) {
+            env.build_ok = false
+            sh 'echo "Openjdk Example Test Failed"'
+        }
+    }
+
+    if ((Float.parseFloat(env.os_version) < 21) && !((env.node_label == "graphene_oot") && (env.SGX == '1')) && !((env.node_label == "graphene_dcap") && (env.SGX == '1')))
+    {
+        try {
+            timeout(time: 15, unit: 'MINUTES') {
+                sh '''
+                    cd CI-Examples/tensorflow-lite
+                    ../common_tools/download --output bazel-0.16.1-installer-linux-x86_64.sh \
+                    --sha256 17ab70344645359fd4178002f367885e9019ae7507c9c1ade8220f3628383444 \
+                    --url https://github.com/bazelbuild/bazel/releases/download/0.16.1/bazel-0.16.1-installer-linux-x86_64.sh
+                    chmod +x ./bazel-0.16.1-installer-linux-x86_64.sh
+                    ./bazel-0.16.1-installer-linux-x86_64.sh --user
+                    if [ "${os_release_id}" != 'ubuntu' ]
+                    then
+                        make ${MAKEOPTS} tensorflow/configure
+                        sed -i '$ a loader.pal_internal_mem_size = "64M"' label_image.manifest.template
+                        sed -i "s/\\/usr\\/bin\\/env python/\\/usr\\/bin\\/env python3/" tensorflow/tensorflow/tools/git/gen_git_source.py
+                        make PYTHON_BIN_PATH=${PYTHON_BIN_PATH}
+                    fi
+                    make all
+                    make ${MAKEOPTS} run-gramine > OUTPUT
+                '''
+            }
+        } catch (Exception e){
+            env.build_ok = false
+            sh 'echo "TensorFlow Example Test Failed"'
+        }
+    }
+    if (!((env.node_label == "graphene_oot") && (env.SGX == '1')))
+    {
+        try {
+            timeout(time: 10, unit: 'MINUTES') {
+                sh '''
+                    cd CI-Examples/curl
+                    if [ "${os_release_id}" != 'ubuntu' ]
+                    then
+                        sed -i '$ a loader.pal_internal_mem_size = "64M"' curl.manifest.template
+                    fi
+                    make ${MAKEOPTS} all
+                    make ${MAKEOPTS} check > RESULT
+                '''
+            }
+        } catch (Exception e){
+            env.build_ok = false
+            sh 'echo "Curl Example Test Failed"'
+        }
+
+        try {
+            timeout(time: 5, unit: 'MINUTES') {
+                sh '''
+                    cd CI-Examples/nodejs
+                    if [ "${os_release_id}" != 'ubuntu' ]
+                    then
+                        sed -i '$ a loader.pal_internal_mem_size = "64M"' nodejs.manifest.template
+                        sed -i "s/{{ nodejs_dir }}\\/nodejs/{{ nodejs_dir }}\\/node/g" nodejs.manifest.template
+                    fi
+                    make ${MAKEOPTS} all
+                    make ${MAKEOPTS} check > RESULT
+                '''
+            }
+        } catch (Exception e){
+            env.build_ok = false
+            sh 'echo "Nodejs Example Test Failed"'
+        }
+
+        try {
+            timeout(time: 20, unit: 'MINUTES') {
+                sh '''
+                    cd CI-Examples/r
+                    if [ "${os_release_id}" != 'ubuntu' ]
+                    then
+                        export R_HOME=/usr/lib64/R
+                        sed -i '$ a loader.pal_internal_mem_size = "128M"' R.manifest.template
+                        sed -i \'/^sgx.trusted_files = \\[.*/a "file:/usr/bin/which",\' R.manifest.template
+                        sed -i \'/^sgx.trusted_files = \\[.*/a "file:/usr/bin/uname",\' R.manifest.template
+                        sed -i \'/^sgx.trusted_files = \\[.*/a "file:/usr/bin/sh",\' R.manifest.template
+                        sed -i \'/^sgx.trusted_files = \\[.*/a "file:/usr/bin/rm",\' R.manifest.template
+                        sed -i 's/sgx.enclave_size = "1G"/sgx.enclave_size = "2G"/' R.manifest.template
+                    fi
+                    if [ "${os_release_id}" = 'centos' ]
+                    then
+                        sed -i \'/^sgx.trusted_files = \\[.*/a "file:/usr/bin/coreutils",\' R.manifest.template
+                        sed -i \'/^sgx.trusted_files = \\[.*/a "file:/usr/lib64/libcap.so.2",\' R.manifest.template
+                    fi
+                    make ${MAKEOPTS} all
+                    gramine-${MODE} ./R --slave --vanilla -f scripts/sample.r > RESULT_1
+                    gramine-${MODE} ./R --slave --vanilla -f scripts/R-benchmark-25.R > RESULT_2
+                '''
+            }
+        } catch (Exception e){
+            env.build_ok = false
+            sh 'echo "R Example Test Failed"'
+        }
+    }    
+
+    if (!((env.no_cpu.toInteger() < 16) && (env.SGX == '1')))
+    {
+        try {
+            timeout(time: 15, unit: 'MINUTES') {
+                sh '''
+                    cd CI-Examples/pytorch
+                    if [ "${os_release_id}" != 'ubuntu' ]
+                    then
+                        if [ "${os_release_id}" == 'centos' ]
+                        then
+                            sed -i '$ a loader.argv0_override="{{ entrypoint }}"' pytorch.manifest.template
+                            sed -i -e "/^sgx.trusted_files = \\[.*/a \\"file:$SETUPTOOLS_PATH\\/\\"," pytorch.manifest.template
+                            sed -i -e "/^sgx.trusted_files = \\[.*/a \\"file:$DATACLASSES_PATH\\/\\"," pytorch.manifest.template
+                            sed -i -e "/file:{{ python.distlib }}/,+d" pytorch.manifest.template
+                        else
+                            sed -i \'s/"file:{{ python.distlib }}/"file:\\/usr\\/local\\/lib\\/python3.6\\/site-packages/\' pytorch.manifest.template
+                        fi
+                    fi
+                    python3 download-pretrained-model.py
+                    make ${MAKEOPTS} all
+                    gramine-${MODE} ./pytorch ./pytorchexample.py
+                '''
+            }
+        } catch (Exception e){
+            env.build_ok = false
+            sh 'echo "Pytorch Example Test Failed"'
+        }
+    }
+
+    if (!((env.no_cpu.toInteger() < 16) && (env.SGX == '1'))) {
+        if ((Float.parseFloat(env.os_version) < 21) && (env.os_release_id != "centos")) {
+            try {
+                timeout(time: 30, unit: 'MINUTES') {
+                    sh '''#!/bin/bash
+                        set -x
+                        cd CI-Examples/openvino
+                        chmod +x ./openvino_setup.sh
+                        ./openvino_setup.sh
+                        source openvino_2021/bin/setupvars.sh
+                        sed -i '$ a loader.pal_internal_mem_size = "64M"' benchmark_app.manifest.template
+                        sed -i '$ a sgx.nonpie_binary = true' benchmark_app.manifest.template
+                        sed -i 's/intel_models public_models/intel_models/' Makefile
+                        make ${MAKEOPTS} intel_models
+                        model_name="bert-large-uncased-whole-word-masking-squad-0001"
+                        make ${MAKEOPTS} all
+                        gramine-${MODE} benchmark_app -m model/intel/${model_name}/FP32/${model_name}.xml > OUTPUT
+                    '''
+                }
+            } catch (Exception e){
+                env.build_ok = false
+                sh 'echo "OpenVino Example Test Failed"'
+            }
+        }
+    }
+
+    try {
+        timeout(time: 30, unit: 'MINUTES') {
+            sh '''
+                cd CI-Examples/rust
+                if [ "${os_release_id}" == 'centos' ]
+                then
+                    sudo yum install -y *.rpm
+                fi
+                make ${MAKEOPTS}
+                make ${MAKEOPTS} start-gramine-server &
+                ../../Scripts/wait_for_server 60 127.0.0.1 3000
+                LOOP=1 CONCURRENCY_LIST="1 32" ../common_tools/benchmark-http.sh 127.0.0.1:3000 > RESULT
+            '''
+        }
+    } catch (Exception e){
+        env.build_ok = false
+        sh 'echo "Rust example Test Failed"'
+    }
+
+    if (env.os_release_id == "ubuntu" && (!((env.node_label == "graphene_oot") && (env.SGX == '1'))))
+    {
+        try {
+            timeout(time: 10, unit: 'MINUTES') {
+                sh '''
+                    cd CI-Examples/gcc
+                    make ${MAKEOPTS} all
+                    make ${MAKEOPTS} check > OUTPUT
+                '''
+            }
+        } catch (Exception e){
+            env.build_ok = false
+            sh 'echo "GCC Example Test Failed"'
+        }
+    }
+}

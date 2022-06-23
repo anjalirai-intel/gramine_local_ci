@@ -1,0 +1,78 @@
+ROOTDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+
+BUILDDIR = $(ROOTDIR)/build
+INSTALLDIR = $(ROOTDIR)/install
+TESTCASEDIR = $(INSTALLDIR)/testcases/bin
+LTP_SCENARIO = "install/runtest/syscalls-new"
+SRCDIR = $(ROOTDIR)/ltp_src
+clean-extra += clean-build
+CFG = ltp_tests.cfg
+XML_FILE = ltp.xml	
+ifeq ($(SGX),1)
+	BUILDDIR:=$(BUILDDIR)-sgx
+	INSTALLDIR:=$(INSTALLDIR)-sgx
+	LTP_SCENARIO = "install-sgx/runtest/syscalls-new"
+	CFG = ltp_tests.cfg ltp-sgx_tests.cfg ltp-bug-1075_tests.cfg
+	XML_FILE = ltp-sgx.xml	
+endif
+
+VERSION = $(shell uname -r)
+export VERSION
+
+.PHONY: all
+all: $(INSTALLDIR)/INSTALL_SUCCESS manifests etc/nsswitch.conf etc/passwd
+
+$(SRCDIR)/Makefile:
+	$(error "$(SRCDIR) is empty. Please run `git submodule update --init $(SRCDIR)` or download the LTP source code (https://github.com/linux-test-project/ltp) into $(SRCDIR).")
+
+$(SRCDIR)/configure: $(SRCDIR)/Makefile
+	$(MAKE) -C $(SRCDIR) autotools
+
+.SECONDARY: $(BUILDDIR)/BUILD_SUCCESS
+$(BUILDDIR)/BUILD_SUCCESS: $(SRCDIR)/configure
+	# Out-of-tree build steps were taken from ltp/INSTALL.
+	# The instructions below assume that SRCDIR and BUILDDIR are absolute.
+	sed -i 's/un.release/"$(VERSION)"/g' $(SRCDIR)/lib/tst_kconfig.c
+	@if [ $(SGX) = 1 ]; then \
+		sed -i 's/MAP_SHARED/MAP_PRIVATE/g' $(SRCDIR)/lib/tst_test.c;\
+	fi
+	mkdir -p $(BUILDDIR)
+	# Kernel module tests are not meaningful for our LibOS and building them causes troubles on
+	# incompatible host kernels.
+	cd $(BUILDDIR) && $(SRCDIR)/configure --without-modules --prefix $(INSTALLDIR)
+	$(MAKE) -C $(BUILDDIR) -f $(SRCDIR)/Makefile top_srcdir=$(SRCDIR) top_builddir=$(BUILDDIR) all
+	touch $@
+
+.SECONDARY: $(INSTALLDIR)/INSTALL_SUCCESS
+$(INSTALLDIR)/INSTALL_SUCCESS: $(BUILDDIR)/BUILD_SUCCESS
+	$(MAKE) -C $(BUILDDIR) -f $(SRCDIR)/Makefile top_srcdir=$(SRCDIR) top_builddir=$(BUILDDIR) SKIP_IDCHECK=1 install
+	ln -sf $(abspath Makefile_testcases.LTP) $(TESTCASEDIR)/Makefile
+	touch $@
+
+.PHONY: manifests
+manifests: $(INSTALLDIR)/INSTALL_SUCCESS
+	gramine-test build
+
+etc/nsswitch.conf:
+	mkdir -p etc
+	printf "passwd: compat\ngroup: compat\nshadow: compat\nhosts: files\n" > $@
+
+etc/passwd:
+	mkdir -p etc
+	printf "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n" > $@
+
+.PHONY: regression
+regression: manifests
+	LTP_CONFIG="$(CFG)" LTP_SCENARIO=$(LTP_SCENARIO) python3 -m pytest -v --junit-xml="$(XML_FILE)"
+
+.PHONY: clean
+clean:
+	if test -f $(INSTALLDIR)/INSTALL_SUCCESS; then gramine-test clean; fi
+	$(MAKE) -C $(SRCDIR) clean
+	$(RM) -r \
+		$(BUILDDIR) \
+		$(INSTALLDIR) \
+		ltp*.xml \
+		etc/ \
+		.pytest_cache \
+		__pycache__

@@ -1,0 +1,35 @@
+node(node_label) {
+    env.ORIG_WKSP = env.WORKSPACE
+    env.build_ok = true
+    try {
+        stage('checkout'){
+            dir ('./') {
+                git url: 'https://github.com/jinengandhi-intel/graphene_local_ci.git'
+            }
+
+            dir('gsc_dev_repo') {
+                git url: 'https://github.com/gramineproject/gsc.git'
+            }
+        }
+    
+        dir ("gsc_dev_repo") {
+            sh 'cp -rf $WORKSPACE/gsc/templates/ubuntu/* templates/ubuntu/'
+            sh 'cp -rf $WORKSPACE/gsc/templates/centos/* templates/centos/'
+            sh 'cp -rf $WORKSPACE/gsc/test/* test'
+            env.WORKSPACE = env.WORKSPACE + "/gsc_dev_repo"
+
+            load '../ci/lib/stage-test-gsc.jenkinsfile'
+            load '../ci/lib/stage-test-gsc-python.jenkinsfile'
+        }
+    } finally {
+        stage('Workspace cleanup'){
+            sh 'rm -rf $ORIG_WKSP/*'
+        }
+    }
+
+    if(env.build_ok) {
+        currentBuild.result = "SUCCESS"
+    } else {
+        currentBuild.result = "FAILURE"
+    }
+}
